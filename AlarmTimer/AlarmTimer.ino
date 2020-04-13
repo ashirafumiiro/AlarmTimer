@@ -4,6 +4,15 @@
  * PushButtons are on Arduino DigitalPins 2,3,4,5,6,7 i.e ATMEGA pins 4,5,6,11,12,13
  * LED is on Arduino digitalpin 12 or pin18 on ATMEGA
  * The LED is used to immitate a relay
+ * 
+ * 
+ * 
+ * 
+ * 
+ * 
+ * 
+ * 
+ * NOTE: Manual Alarm will be made available by an interrupt.
  */
 
 #include <Wire.h> 
@@ -29,20 +38,11 @@ DS3231  rtc(SDA, SCL);
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
 String alarmsMenu[] = {"Current Time", "Alarm1", "Alarm2", "Alarm3", "Alarm4", "Alarm5", "Alarm6"}; // First item is for current Time
-int timeArray[3] = {0};  // to store hour, min, sec when editing time
-int dateArray[3] = {0};  // to store day/month/year while editing date
 
-int alarmsHours[NUM_ALARMS] = {1,2,3,4,5,6};
-int alarmsMins[NUM_ALARMS] =  {1,2,3,4,5,6};
-byte daysConfig[NUM_ALARMS][7] = {//M, T, W, T, F, S, S
-                                  { 0, 1, 1, 0, 1, 0, 1 },  // Alarm 1
-                                  { 1, 0, 1, 1, 0, 0, 1 },
-                                  { 0, 1, 1, 0, 1, 1, 0 },
-                                  { 1, 0, 1, 1, 0, 0, 1 },
-                                  { 0, 1, 1, 0, 1, 0, 1 }, 
-                                  { 1, 1, 0, 0, 0, 0, 0 }   // Alarm 6
+int alarmsTime[NUM_ALARMS][2] = {0};   // {HH,MM}
+bool daysConfig[NUM_ALARMS][7] = {0};  // all seven days initialise as off.
                                   
-                                };  // all seven days initialise as off.
+                                
 String daysLong[]  = {"Mon ", "Tue ", "Wed ", "Thur", "Fri ", "Sat ", "Sun "};
 
 int currentPage = 0;
@@ -53,6 +53,19 @@ int currentLevel = 0; // 0-scroll, 1-edit
 
 String prevDate = "";
 
+// Contro ringing
+bool isRing = false;
+int ringInterval = 2000; // 2s
+int ringNumber = 3;  //ring 3 times
+int lastActiveAlarmDate = 0;
+int lastActiveAlarmMins = 0;
+int lastActiveAlarmHour = 0;
+int lastActiveAlarm = 0;
+long long startAlarmTime = 0;
+bool pauseAlarm = true;
+int elapsedRings = 0;
+int testDay = 0;
+
 
 void setup()
 {
@@ -61,21 +74,20 @@ void setup()
   rtc.begin();
   pinMode(RELAY_PIN, OUTPUT);
   Serial.begin(9600);
-  Serial.println(rtc.getDOWStr());
+  //Uncomment to initialize for first time, then re-appload
+  //saveToEEPROM();
+
+  
+  //Read larms config from eeprom
+  int eeAddress = 0;
+  EEPROM.get(eeAddress, alarmsTime);
+  eeAddress += sizeof(alarmsTime);
+  EEPROM.get(eeAddress, daysConfig);
 }
 
 //////////////////////////////////   LOOP    ////////////////////////////////////////////////////////
 
 void loop () {
-  
-//    if(readButtonState(LEFT)){
-//     Serial.println("LEFT");
-//      
-//    }
-//
-//    if(readButtonState(RIGHT)){
-//      Serial.println("RIGHT");
-//    }
 
     //Scrolling alarms and allow entering settings
     if(readButtonState(UP)){
@@ -92,12 +104,68 @@ void loop () {
         if(currentPage == 0){  // Enter time and date settings
           settingTime();
         }
+        else{
+          settingAlarms();
+        }
     }
 
-//    if(readButtonState(BACK)){
-//      Serial.println("BACK");
-//    }
+    if(readButtonState(BACK)){
+      currentPage = 0;
+    }
+    
     displayScreen();
+
+    // Check for alarms
+    Time now = rtc.getTime();
+    int h = now.hour ;
+    int m = now.min;
+    int d = now.date;  // to help disable alarm
+    int Month = now.mon;
+    for(int i=0; i<NUM_ALARMS; i++){
+       if(h==alarmsTime[i][0] && m==alarmsTime[i][1]){ // alarm time matches, proceed with other checks     
+          if(daysConfig[i][getDayIndex(rtc.getDOWStr())-1]==true){  // Match day
+            /*
+             *  int lastActiveAlarmDate = 0;
+                int lastActiveAlarmHour = 0
+                int lastActiveAlarm = 0;
+            */
+            if((lastActiveAlarmDate != d)||(lastActiveAlarmHour!=h)||(lastActiveAlarm!=i)||(lastActiveAlarmMins!=m)){  // alarms has not yet rang today
+              Serial.println(F("Activated alarm"));
+              isRing = true;
+              lastActiveAlarmDate = d;  // Alarm done for today
+              lastActiveAlarmHour = h;
+              lastActiveAlarm =i;
+              lastActiveAlarmMins = m;
+              startAlarmTime = millis();
+              pauseAlarm = false;
+              Serial.print(F("Started"));
+            }   
+          }
+       }
+    }
+
+    if(isRing){
+      if((millis() - startAlarmTime) > ringInterval){
+        startAlarmTime = millis();  // reset interval
+        if(!pauseAlarm)elapsedRings++;
+        pauseAlarm = !pauseAlarm;
+        if(elapsedRings >= ringNumber)
+        {
+          isRing = false;
+          pauseAlarm = true;
+          elapsedRings = 0;
+        }       
+      }
+    }
+
+    if(!pauseAlarm){
+      digitalWrite(RELAY_PIN, 1);
+    }
+    else{
+      digitalWrite(RELAY_PIN, 0);
+    }
+    
+   
 }
 
 
@@ -133,12 +201,10 @@ void displayScreen(){
   }
   else{
     if(!prevPage) lcd.clear();  // clear page each you are from home page. alot of data defers
-    int h = alarmsHours[currentPage-1];
-    int m = alarmsMins[currentPage-1];
-    lcd.setCursor(0,0);
-    lcd.print(alarmsMenu[currentPage]);  
-    displayAlarmData();
-    
+     
+    if(prevPage != currentPage){
+      displayAlarmData();
+    }  
   }  
 
   prevPage = currentPage;
@@ -153,23 +219,26 @@ bool readButtonState(int buttonPin){
 }
 
 void displayAlarmData(){
-  lcd.print(": "+prependZero(alarmsHours[0])+":" + prependZero(alarmsMins[0]));
+  int alarmIndex = currentPage-1;
+  lcd.setCursor(0,0);
+  lcd.print(alarmsMenu[currentPage]); 
+  lcd.print(": "+prependZero(alarmsTime[alarmIndex][0])+":" + prependZero(alarmsTime[alarmIndex][1]));
   lcd.setCursor(0,1);
-  lcd.print(F("Mon "));  lcd.print(0);
+  lcd.print(F("Mon "));  lcd.print(daysConfig[alarmIndex][0]);
   lcd.setCursor(0,2);
-  lcd.print(F("Tue "));  lcd.print(0);
+  lcd.print(F("Tue "));  lcd.print(daysConfig[alarmIndex][1]);
   lcd.setCursor(0,3);
-  lcd.print(F("Wed "));  lcd.print(0);
+  lcd.print(F("Wed "));  lcd.print(daysConfig[alarmIndex][2]);
   // new column
   lcd.setCursor(7,1);
-  lcd.print(F("Thu "));  lcd.print(0);
+  lcd.print(F("Thu "));  lcd.print(daysConfig[alarmIndex][3]);
   lcd.setCursor(7,2);
-  lcd.print(F("Fri "));  lcd.print(0);
+  lcd.print(F("Fri "));  lcd.print(daysConfig[alarmIndex][4]);
   lcd.setCursor(7,3);
-  lcd.print(F("Sat "));  lcd.print(0);
+  lcd.print(F("Sat "));  lcd.print(daysConfig[alarmIndex][5]);
   //Last column
   lcd.setCursor(14,1);
-  lcd.print(F("Sun "));  lcd.print(0);
+  lcd.print(F("Sun "));  lcd.print(daysConfig[alarmIndex][6]);
   
 }
 
@@ -390,13 +459,17 @@ int getDayIndex(String dayStr){
 }
 
 
-void settingAlarms(int alarmNumber){
+void settingAlarms(){
 
+  int alarmIndex = currentPage-1;
+  
   bool settingMode = true;
   bool btnPressed = false;
 
-  int setting = 1; // 1-day, 2-month, 3-year, 4-day of week 5-hour, 6-min, 7-seconds
-    
+  int setting = 1; // 1-hour, 2-min, 3-mon, 4-tue  5-wed, 6-thur, 7-fri, 8-sat, 9-san
+
+  lcd.blink();
+  lcd.setCursor(9,0);
   while(settingMode){
     // readbuttons to determine action
     bool left = readButtonState(LEFT);
@@ -407,29 +480,186 @@ void settingAlarms(int alarmNumber){
     bool back = readButtonState(BACK);
 
     if(back){
+      prevPage++;
+      lcd.noBlink();
+      settingMode = false;
+    }
+
+    if(select){
+      if(setting < 3){ // go set days
+        setting = 3;
+        btnPressed = true;
+      }
+      else{ //Already setting days, finish
+        // Save data to EEPROM
+        saveToEEPROM();
+        prevPage++;
+        lcd.noBlink();
+        settingMode = false;
+      }
+      
       
     }
 
-    if(back){
-      
+    if(up){
+        switch(setting){
+          case 1:
+            alarmsTime[alarmIndex][0]++;
+            if(alarmsTime[alarmIndex][0]==24) alarmsTime[alarmIndex][0]=0; // reset to 0 after 23
+            break;
+          case 2:
+            alarmsTime[alarmIndex][1]++;
+            if(alarmsTime[alarmIndex][1] == 60)alarmsTime[alarmIndex][1]=0;
+            break;
+          case 3:
+            daysConfig[alarmIndex][0] = !daysConfig[alarmIndex][0]; // change values between 1 and 0
+            break;
+          case 4:
+            daysConfig[alarmIndex][1] = !daysConfig[alarmIndex][1];
+            break;
+          case 5:
+            daysConfig[alarmIndex][2] = !daysConfig[alarmIndex][2];
+            break;
+          case 6:
+            daysConfig[alarmIndex][3] = !daysConfig[alarmIndex][3];
+            break;
+          case 7:
+            daysConfig[alarmIndex][4] = !daysConfig[alarmIndex][4];
+            break;
+          case 8:
+            daysConfig[alarmIndex][5] = !daysConfig[alarmIndex][5];
+            break; 
+          case 9:
+            daysConfig[alarmIndex][6] = !daysConfig[alarmIndex][6];
+            break;
+        }
+        btnPressed = true;    
     }
 
-    if(back){
-      
+    if(down){
+        switch(setting){
+          case 1:
+            if(alarmsTime[alarmIndex][0]>0)alarmsTime[alarmIndex][0]--;
+            break;
+          case 2:
+            if(alarmsTime[alarmIndex][1]>0)alarmsTime[alarmIndex][1]--;
+            break;
+          case 3:
+            daysConfig[alarmIndex][0] = !daysConfig[alarmIndex][0]; // change values between 1 and 0
+            break;
+          case 4:
+            daysConfig[alarmIndex][1] = !daysConfig[alarmIndex][1];
+            break;
+          case 5:
+            daysConfig[alarmIndex][2] = !daysConfig[alarmIndex][2];
+            break;
+          case 6:
+            daysConfig[alarmIndex][3] = !daysConfig[alarmIndex][3];
+            break;
+          case 7:
+            daysConfig[alarmIndex][4] = !daysConfig[alarmIndex][4];
+            break;
+          case 8:
+            daysConfig[alarmIndex][5] = !daysConfig[alarmIndex][5];
+            break; 
+          case 9:
+            daysConfig[alarmIndex][6] = !daysConfig[alarmIndex][6];
+            break;
+        }
+        btnPressed = true;
     }
 
-    if(back){
-      
-    }
+    if(left){
+       if(setting > 1) // move backward
+          setting--;
+          btnPressed = true;
+     }
 
-    if(back){
-      
-    }
+     if(right){
+       if(setting < 9) // move forward
+         setting++;
+         btnPressed = true;
+     }
 
-    if(back){
-      
-    }
+    if(btnPressed){
+        updateAlarmSettingScreen(alarmIndex,setting);
+        switch(setting){
+          case 1:
+            lcd.setCursor(9,0);
+            break;
+          case 2:
+            lcd.setCursor(12,0);
+            break;
+          case 3:
+            lcd.setCursor(4,1);
+            break;
+          case 4:
+            lcd.setCursor(4,2);
+            break;
+          case 5:
+            lcd.setCursor(4,3);
+            break;
+          case 6:
+            lcd.setCursor(11,1);
+            break;
+          case 7:
+            lcd.setCursor(11,2);
+            break;
+          case 8:
+            lcd.setCursor(11,3);
+            break; 
+          case 9:
+            lcd.setCursor(18,1);
+            break; 
+        }
+        btnPressed = false;
+      }
       
   }
   
+}
+
+void updateAlarmSettingScreen(int alarmIndex, int setting){
+  switch(setting){
+          case 1:
+          case 2:
+            lcd.setCursor(8,0);
+            lcd.print(prependZero(alarmsTime[alarmIndex][0])+":" + prependZero(alarmsTime[alarmIndex][1]));
+            break;
+          case 3:
+            lcd.setCursor(4,1);
+            lcd.print(daysConfig[alarmIndex][0]);
+            break;
+          case 4:
+            lcd.setCursor(4,2);
+            lcd.print(daysConfig[alarmIndex][1]);
+            break;
+          case 5:
+            lcd.setCursor(4,3);
+            lcd.print(daysConfig[alarmIndex][2]);
+            break;
+          case 6:
+            lcd.setCursor(11,1);
+            lcd.print(daysConfig[alarmIndex][3]);
+            break;
+          case 7:
+            lcd.setCursor(11,2);
+            lcd.print(daysConfig[alarmIndex][4]);
+            break;
+          case 8:
+            lcd.setCursor(11,3);
+            lcd.print(daysConfig[alarmIndex][5]);
+            break; 
+          case 9:
+            lcd.setCursor(18,1);
+            lcd.print(daysConfig[alarmIndex][6]);
+            break; 
+        }
+}
+
+void saveToEEPROM(){
+  int eeAddress = 0;
+  EEPROM.put(eeAddress, alarmsTime); // first stores the two element array of time and min
+  eeAddress += sizeof(alarmsTime);
+  EEPROM.put(eeAddress, daysConfig);
 }
